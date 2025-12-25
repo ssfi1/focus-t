@@ -1,13 +1,13 @@
 
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#4f46e5" />
     <title>WorkFlow Timer</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='0' y='0' width='24' height='24' rx='6' fill='%234f46e5' stroke='none'/%3E%3Ccircle cx='12' cy='12' r='8' stroke='white'/%3E%3Cpolyline points='12 6 12 12 16 14' stroke='white'/%3E%3C/svg%3E" />
-    <link rel="manifest" href="/manifest.json">
+    <link rel="manifest" href="./manifest.json">
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
@@ -115,15 +115,15 @@
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
       }
     </style>
-  <script type="importmap">
+<script type="importmap">
 {
   "imports": {
-    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
-    "lucide-react": "https://esm.sh/lucide-react@^0.561.0",
+    "firebase/": "https://esm.sh/firebase@^12.7.0/",
     "react/": "https://esm.sh/react@^19.2.3/",
     "react": "https://esm.sh/react@^19.2.3",
     "react-dom": "https://esm.sh/react-dom@^19.2.3",
-    "firebase/": "https://esm.sh/firebase@^12.7.0/"
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "lucide-react": "https://esm.sh/lucide-react@^0.562.0"
   }
 }
 </script>
@@ -131,5 +131,6 @@
   <body class="antialiased transition-colors duration-500 text-slate-900 dark:text-slate-100 select-none">
     <div class="mesh-bg"></div>
     <div id="root"></div>
+    <script type="module" src="./index.tsx"></script>
   </body>
 </html>
