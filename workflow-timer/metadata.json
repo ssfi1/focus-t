@@ -1,0 +1,5 @@
+{
+  "name": "WorkFlow Timer",
+  "description": "A professional time tracking application. Features include start/complete workflow, pause/resume, hold functionality, group management, search, excel export, and detailed timelines.",
+  "requestFramePermissions": []
+}
