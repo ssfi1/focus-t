@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Play, Pause, Square, History, Clock, Archive, Sun, Moon, CheckCircle2, Search, Download, Settings, Plus, X, Trash2, ChevronDown, BarChart2, Calendar as CalendarIcon, CalendarDays, PieChart, CirclePause, LogIn, LogOut, Coffee, AlertTriangle, RefreshCcw, ExternalLink, Maximize2, ArrowDown, ArrowRight, Filter, AlertCircle, Stamp, Gem, ArrowUp, Zap, ChevronLeft, ChevronRight, PictureInPicture, MoreVertical, Hand, List, LayoutList, Layers, PanelTop } from 'lucide-react';
 import { Session, TimeSegment, TimerStatus, Group, NotificationSettings } from './types';
@@ -13,11 +12,13 @@ import { SettingsModal } from './components/SettingsModal';
 import { Dropdown } from './components/Dropdown';
 import { MiniCalendar } from './components/MiniCalendar';
 import { TimetableList } from './components/TimetableList';
+import { LoginPromptModal } from './components/LoginPromptModal';
+import { DataConflictModal } from './components/DataConflictModal';
 
 // Firebase Imports
 import { auth, googleProvider, db } from './firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
-import { doc, onSnapshot, setDoc, collection, query, orderBy, getDocs, writeBatch, deleteDoc } from 'firebase/firestore';
+import { doc, onSnapshot, setDoc, collection, query, orderBy, getDocs, writeBatch, deleteDoc, getDoc } from 'firebase/firestore';
 
 // Helper for safe local storage parsing
 const loadState = <T,>(key: string, defaultValue: T): T => {
@@ -36,6 +37,22 @@ export default function App() {
   // --- Auth State ---
   const [user, setUser] = useState<User | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [showLoginPrompt, setShowLoginPrompt] = useState(false);
+  
+  // --- Conflict & Optimization Modal State ---
+  const [showConflictModal, setShowConflictModal] = useState(false);
+  const [pendingCloudData, setPendingCloudData] = useState<Session[]>([]);
+  
+  // Detect Mobile for Login Prompt Warning
+  const isMobile = useMemo(() => {
+      if (typeof navigator === 'undefined') return false;
+      const userAgent = navigator.userAgent.toLowerCase();
+      const isTablet = /(ipad|tablet|(android(?!.*mobile))|(windows(?!.*phone)(.*touch))|kindle|playbook|silk|(puffin(?!.*(IP|AP|WP))))/.test(userAgent);
+      const isMobileDevice = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      const isSmallScreen = window.matchMedia("(max-width: 1024px)").matches;
+      const hasTouch = navigator.maxTouchPoints > 0;
+      return isMobileDevice || isTablet || (isSmallScreen && hasTouch);
+  }, []);
 
   // State with Lazy Initialization
   const [status, setStatus] = useState<TimerStatus>(() => (localStorage.getItem('workflow-status') as TimerStatus) || 'idle');
@@ -145,6 +162,11 @@ export default function App() {
   const lastBreakNotificationTime = useRef<number>(0);
   const filterScrollRef = useRef<HTMLDivElement>(null);
   
+  // Refs for auto-hold logic
+  const statusRef = useRef(status);
+  const currentSessionRef = useRef(currentSession);
+  const historyRef = useRef(sessionHistory);
+
   // Silent Audio for Background Timer Persistence & Media Session
   const silentAudioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -160,6 +182,46 @@ export default function App() {
       return activeHistory;
   }, [activeHistory, currentSession]);
 
+  // Update Refs for Auto-Hold Logic
+  useEffect(() => {
+    statusRef.current = status;
+    currentSessionRef.current = currentSession;
+    historyRef.current = sessionHistory;
+  }, [status, currentSession, sessionHistory]);
+
+  // Auto-Hold on Window Close/Reload
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+        if (statusRef.current === 'running' && currentSessionRef.current) {
+            const now = Date.now();
+            const session = currentSessionRef.current;
+            
+            // Close current segment
+            const updatedSegments = [...session.segments];
+            const lastIdx = updatedSegments.length - 1;
+            updatedSegments[lastIdx] = { ...updatedSegments[lastIdx], end: now };
+
+            const holdSession = {
+                ...session,
+                segments: updatedSegments,
+                isActive: false,
+                isFinished: true,
+                completionStatus: 'on-hold' as const
+            };
+
+            // Update LocalStorage directly to save state
+            const currentHistory = historyRef.current;
+            const newHistory = [holdSession, ...currentHistory];
+            
+            localStorage.setItem('workflow-history', JSON.stringify(newHistory));
+            localStorage.setItem('workflow-status', 'idle');
+            localStorage.removeItem('workflow-current-session');
+        }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, []);
+
   // --- Firebase Synchronization Logic ---
 
   // 1. Auth Listener
@@ -167,6 +229,18 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       setIsAuthLoading(false);
+      
+      // Initial Login Prompt Logic
+      if (!currentUser) {
+          const skipped = localStorage.getItem('workflow-skip-login');
+          if (!skipped) {
+              // Small delay to ensure smooth UI transition
+              setTimeout(() => setShowLoginPrompt(true), 1000);
+          } 
+      } else {
+          // If logged in, ensure prompt is closed
+          setShowLoginPrompt(false);
+      }
     });
     return () => unsubscribe();
   }, []);
@@ -179,13 +253,18 @@ export default function App() {
     const userDocRef = doc(db, 'users', user.uid);
     const unsubDoc = onSnapshot(userDocRef, (docSnap) => {
       if (docSnap.exists()) {
-        const data = docSnap.data();
+        const data = docSnap.data() as any; // Cast to any
         if (data.status) setStatus(data.status);
+        if (data.activeGroupId) setActiveGroupId(data.activeGroupId); // Sync Active Group ID
         if (data.currentSession !== undefined) {
              setCurrentSession(data.currentSession);
              if (data.currentSession) {
+                 // SYNC: Ensure input field matches the remote session to keep text sync correct on all devices
                  setTaskNameInput(data.currentSession.name);
+                 
                  setElapsedTime(calculateTotalDuration(data.currentSession.segments));
+                 // SYNC: Ensure activeGroupId matches the loaded session's group
+                 setActiveGroupId(data.currentSession.groupId);
              } else {
                  setElapsedTime(0);
              }
@@ -200,7 +279,7 @@ export default function App() {
     const historyQuery = query(collection(db, 'users', user.uid, 'history'), orderBy('createdAt', 'desc'));
     const unsubHistory = onSnapshot(historyQuery, (snapshot) => {
         const historyData: Session[] = [];
-        snapshot.forEach((doc) => {
+        (snapshot as any).forEach((doc: any) => { // Cast snapshot to any
             historyData.push(doc.data() as Session);
         });
         setSessionHistory(historyData);
@@ -223,13 +302,16 @@ export default function App() {
 
       try {
           if (type === 'status_update') {
-              // Sync Status, Current Session
-              // payload: { status, currentSession }
-              await setDoc(userDocRef, {
-                  status: payload.status,
-                  currentSession: payload.currentSession,
+              // Sync Status, Current Session, and Active Group
+              // payload: { status, currentSession, activeGroupId? }
+              const updateData: any = {
                   lastUpdated: Date.now()
-              }, { merge: true });
+              };
+              if (payload.status !== undefined) updateData.status = payload.status;
+              if (payload.currentSession !== undefined) updateData.currentSession = payload.currentSession;
+              if (payload.activeGroupId !== undefined) updateData.activeGroupId = payload.activeGroupId;
+
+              await setDoc(userDocRef, updateData, { merge: true });
           } 
           else if (type === 'history_update') {
               // When a session is finished/deleted/restored
@@ -246,8 +328,11 @@ export default function App() {
               // Payload: { settings or groups }
               await setDoc(userDocRef, payload, { merge: true });
           }
-      } catch (e) {
+      } catch (e: any) {
           console.error("Firebase Sync Error:", e);
+          if (e.code === 'permission-denied') {
+             showToast('데이터 저장 실패: Firestore 규칙을 확인해주세요.', 'error');
+          }
       }
   }, [user]);
 
@@ -313,6 +398,7 @@ export default function App() {
 
     const handleGlobalClick = (e: MouseEvent) => {
         setAlertState('none');
+        
         const target = e.target as HTMLElement;
         if (!target.closest('.date-filter-popover') && !target.closest('.date-filter-trigger')) {
             setIsDateFilterOpen(false);
@@ -353,7 +439,7 @@ export default function App() {
           silentAudioRef.current = null;
       }
     };
-  }, [user, isDarkMode]); // Added user dependency to storage listener logic
+  }, [user, isDarkMode]);
 
   // Local Storage Fallback (Only when not logged in)
   useEffect(() => { if (!user) localStorage.setItem('workflow-history', JSON.stringify(sessionHistory)); }, [sessionHistory, user]);
@@ -391,15 +477,127 @@ export default function App() {
   
   const toggleTheme = () => setIsDarkMode(!isDarkMode);
 
-  // Auth Handlers
+  // Auth Handlers with Data Conflict Logic
   const handleLogin = async () => {
       try {
-          await signInWithPopup(auth, googleProvider);
-          showToast('성공적으로 로그인되었습니다.', 'success');
-      } catch (error) {
-          console.error(error);
-          showToast('로그인에 실패했습니다.', 'error');
+          const result = await signInWithPopup(auth, googleProvider);
+          const loggedUser = result.user;
+          setUser(loggedUser);
+          
+          // Data Merging Logic (Local -> Cloud)
+          const userDocRef = doc(db, 'users', loggedUser.uid);
+          const userDocSnap = await getDoc(userDocRef);
+          
+          // Fetch Cloud History to check for conflicts
+          const historyCollectionRef = collection(db, 'users', loggedUser.uid, 'history');
+          const cloudSnapshot = await getDocs(historyCollectionRef);
+          const cloudHistory: Session[] = [];
+          cloudSnapshot.forEach(doc => cloudHistory.push(doc.data() as Session));
+
+          // Conflict Check: If both local history and cloud history exist
+          if (sessionHistory.length > 0 && cloudHistory.length > 0) {
+              setPendingCloudData(cloudHistory);
+              setShowConflictModal(true); // Open modal to ask user
+              setShowLoginPrompt(false);
+              return; // Stop automatic merge
+          }
+
+          // No conflict, proceed with default logic (Merge Local to Cloud usually)
+          // 1. Upload Local History
+          const historyUploads = sessionHistory.map(session => {
+              const sessRef = doc(historyCollectionRef, session.id);
+              return setDoc(sessRef, session, { merge: true });
+          });
+          await Promise.all(historyUploads);
+
+          // 2. Initial Setup for New Cloud Users (or Sync Settings if missing)
+          if (!userDocSnap.exists()) {
+              await setDoc(userDocRef, {
+                  settings: notificationSettings,
+                  groups: groups,
+                  status: status,
+                  currentSession: currentSession || null, 
+                  activeGroupId: activeGroupId, // Sync initial activeGroupId
+                  lastUpdated: Date.now()
+              });
+          }
+
+          setShowLoginPrompt(false);
+          showToast(`환영합니다, ${loggedUser.displayName || '사용자'}님!\n데이터가 동기화되었습니다.`, 'success');
+      } catch (error: any) {
+          console.error("Login Error:", error);
+          let msg = '로그인에 실패했습니다.';
+          if (error.code === 'auth/invalid-api-key' || error.message?.includes('api-key')) {
+              msg = 'Firebase 설정 오류:\nAPI Key가 올바르지 않습니다.\nfirebase.ts를 확인해주세요.';
+          } else if (error.code === 'auth/operation-not-allowed') {
+              msg = 'Google 로그인이 활성화되지 않았습니다.\nFirebase 콘솔을 확인해주세요.';
+          } else if (error.code === 'auth/popup-closed-by-user') {
+              return; 
+          }
+          showToast(msg, 'error');
       }
+  };
+
+  // Conflict Resolutions
+  const handleKeepCloud = () => {
+      // Discard local, load cloud
+      setSessionHistory(pendingCloudData);
+      setShowConflictModal(false);
+      showToast('클라우드 데이터를 불러왔습니다.\n로컬 데이터는 덮어씌워졌습니다.', 'success');
+  };
+
+  const handleKeepLocal = async () => {
+      // Force local data to cloud (overwriting conflicts)
+      if (!user) return;
+      const historyCollectionRef = collection(db, 'users', user.uid, 'history');
+      
+      // We overwrite individually. Note: This doesn't delete extra cloud items, just overwrites matching IDs.
+      // For a true "Keep Local", we might want to clear cloud first, but that's risky.
+      // Let's assume uploading local is the intent.
+      const uploads = sessionHistory.map(session => {
+          const sessRef = doc(historyCollectionRef, session.id);
+          return setDoc(sessRef, session); // No merge: true, replace
+      });
+      await Promise.all(uploads);
+      
+      setShowConflictModal(false);
+      showToast('로컬 데이터를 클라우드에 저장했습니다.', 'success');
+  };
+
+  const handleMerge = async () => {
+      // Merge logic: Combine both lists, unique by ID
+      const combined = [...pendingCloudData];
+      sessionHistory.forEach(localSess => {
+          if (!combined.find(c => c.id === localSess.id)) {
+              combined.push(localSess);
+          } else {
+              // ID Conflict? Strategy: Keep the one with later modification? 
+              // Simple strategy: Local wins on conflict for merge
+              const idx = combined.findIndex(c => c.id === localSess.id);
+              combined[idx] = localSess;
+          }
+      });
+      
+      setSessionHistory(combined);
+      
+      // Sync merged result to cloud
+      if(user) {
+          const historyCollectionRef = collection(db, 'users', user.uid, 'history');
+          const uploads = combined.map(session => {
+              const sessRef = doc(historyCollectionRef, session.id);
+              return setDoc(sessRef, session, { merge: true });
+          });
+          await Promise.all(uploads);
+      }
+
+      setShowConflictModal(false);
+      showToast('데이터가 성공적으로 병합되었습니다.', 'success');
+  };
+
+  const handleSkipLogin = () => {
+      localStorage.setItem('workflow-skip-login', 'true');
+      setShowLoginPrompt(false);
+      showToast('동기화를 건너뛰었습니다.\n나중에 설정에서 로그인할 수 있습니다.', 'info');
   };
 
   const handleLogout = async () => {
@@ -500,7 +698,7 @@ export default function App() {
           navigator.mediaSession.playbackState = 'none';
       }
       
-      showToast('기록이 일시 정지되었습니다. (휴식 시간 미포함)', 'info');
+      showToast('기록이 일시 정지되었습니다.\n(휴식 시간 미포함)', 'info');
   };
 
   const handleOpenCalendar = (date?: Date) => {
@@ -747,7 +945,9 @@ export default function App() {
       setTaskNameInput(taskName); 
     } else if ((status === 'paused' || status === 'stopped') && currentSession) {
       newSession = {
-        ...currentSession, isActive: true,
+        ...currentSession, 
+        name: taskNameInput, // Update name in case it changed while paused/stopped
+        isActive: true,
         segments: [...currentSession.segments, { start: Date.now(), end: null } as TimeSegment],
       };
     } else {
@@ -884,7 +1084,7 @@ export default function App() {
 
   const handleContinueSession = (id: string) => {
     if (status === 'running' || status === 'paused' || status === 'stopped') {
-        showToast('이미 타이머가 작동 중입니다. 현재 작업을 완료하거나 일시정지 후 다시 시도해주세요.', 'error');
+        showToast('이미 타이머가 작동 중입니다.\n현재 작업을 완료하거나 일시정지 후 다시 시도해주세요.', 'error');
         return;
     }
     
@@ -919,7 +1119,7 @@ export default function App() {
             memo: sessionToResume.memo
         };
         
-        showToast('새로운 하루의 작업으로 기록이 분리되었습니다.', 'success');
+        showToast('새로운 하루의 작업으로\n기록이 분리되었습니다.', 'success');
     } else {
         // Same Day Resume Logic (Existing)
         mainContainerRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
@@ -929,12 +1129,13 @@ export default function App() {
         // SYNC History delete (move to current)
         syncToFirestore('history_update', { session: sessionToResume, action: 'delete' });
 
+        // IMPORTANT: Clean up 'completionStatus' and 'deletedAt' to prevent undefined value error in Firestore
+        const { completionStatus: _cs, deletedAt: _da, ...cleanSession } = sessionToResume;
+
         newSession = {
-            ...sessionToResume, 
+            ...cleanSession, 
             isActive: true, 
             isFinished: false, 
-            completionStatus: undefined, 
-            deletedAt: undefined,
             segments: [...sessionToResume.segments, { start: Date.now(), end: null }]
         };
     }
@@ -1088,7 +1289,10 @@ export default function App() {
   const restoreSession = (id: string) => {
       const session = sessionHistory.find(s => s.id === id);
       if (session) {
-          const updated = { ...session, deletedAt: undefined };
+          // IMPORTANT: Remove 'deletedAt' property instead of setting it to undefined
+          const { deletedAt: _da, ...rest } = session;
+          const updated = { ...rest };
+          
           setSessionHistory(prev => prev.map(s => s.id === id ? updated : s));
           // SYNC
           syncToFirestore('history_update', { session: updated, action: 'update' });
@@ -1286,7 +1490,7 @@ export default function App() {
                 {toast.type === 'error' && <AlertTriangle className="shrink-0 text-red-500" />}
                 {toast.type === 'success' && <CheckCircle2 className="shrink-0 text-green-500" />}
                 {toast.type === 'info' && <AlertCircle className="shrink-0 text-indigo-400" />}
-                <p className="text-sm font-semibold">{toast.message}</p>
+                <p className="text-sm font-semibold whitespace-pre-line">{toast.message}</p>
             </div>
         </div>
       )}
@@ -1300,6 +1504,16 @@ export default function App() {
                 <ArrowUp size={20} />
             </button>
         </div>
+      )}
+
+      <LoginPromptModal isOpen={showLoginPrompt} onLogin={handleLogin} onSkip={handleSkipLogin} isMobile={isMobile} />
+      
+      {showConflictModal && (
+          <DataConflictModal 
+              onKeepCloud={handleKeepCloud}
+              onKeepLocal={handleKeepLocal}
+              onMerge={handleMerge}
+          />
       )}
 
       {/* Header Hidden Indicator - Shows when header is hidden */}
@@ -1353,20 +1567,6 @@ export default function App() {
                                 <Settings size={20} />
                               </button>
                           </nav>
-
-                          {/* Login/Logout Button */}
-                          <button 
-                              onClick={user ? handleLogout : handleLogin}
-                              className={`
-                                  flex items-center gap-2 px-3 py-2 rounded-full font-bold text-sm transition-all shadow-sm
-                                  ${user 
-                                    ? 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:hover:bg-slate-700' 
-                                    : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-indigo-500/30'}
-                              `}
-                          >
-                              {user ? <LogOut size={16} /> : <LogIn size={16} />}
-                              <span className="hidden sm:inline">{user ? '로그아웃' : '로그인'}</span>
-                          </button>
                       </div>
                       </div>
                   </header>
@@ -1387,7 +1587,7 @@ export default function App() {
                 {!isPopup && (
                     <div className="absolute top-6 left-6 z-50">
                         <Dropdown 
-                            value={activeGroupId}
+                            value={currentSession ? currentSession.groupId : activeGroupId}
                             options={groups.map(g => ({ value: g.id, label: g.name, color: g.color }))}
                             onChange={(val) => { setActiveGroupId(val); if(currentSession) { const updated = {...currentSession, groupId: val}; setCurrentSession(updated); syncToFirestore('status_update', {status, currentSession: updated}); } }}
                             size="sm"
@@ -1422,8 +1622,8 @@ export default function App() {
                 </div>
                 
                 <div className={`text-center flex flex-col items-center justify-center ${isPopup ? 'p-4 min-h-0 flex-1' : 'px-[3vh] pb-[4vh] pt-[8vh] min-h-[40vh] sm:min-h-[50vh]'}`}>
-                    <div className={`relative w-full flex items-center justify-center shrink-0 select-none ${isPopup ? 'h-24 mb-1' : 'h-32 mb-8 sm:h-[25vh]'}`}>
-                        <div className={`transition-all duration-700 ease-[cubic-bezier(0.34,1.56,0.64,1)] absolute flex flex-col items-center ${status === 'paused' ? '-translate-y-[5vh] scale-75 opacity-20 blur-[2px]' : 'translate-y-0 opacity-100 blur-0'} ${status === 'stopped' ? 'scale-90' : 'scale-100'}`}>
+                    <div className={`relative w-full flex items-center justify-center shrink-0 select-none ${isPopup ? 'h-24 mb-1' : 'mb-8 mt-4'}`}>
+                        <div className={`transition-all duration-700 ease-[cubic-bezier(0.34,1.56,0.64,1)] relative flex flex-col items-center ${status === 'paused' ? '-translate-y-[2vh] scale-75 opacity-20 blur-[2px]' : 'translate-y-0 opacity-100 blur-0'} ${status === 'stopped' ? 'scale-90' : 'scale-100'}`}>
                             <div className="relative">
                                 {status === 'stopped' && <div className="absolute -top-12 left-1/2 -translate-x-1/2 flex items-center gap-2 text-rose-500 dark:text-rose-400 font-bold uppercase tracking-widest px-4 py-1 rounded-full bg-rose-50/80 dark:bg-rose-900/60 backdrop-blur-md shadow-sm border border-rose-200/50 dark:border-rose-800/50 animate-in fade-in slide-in-from-bottom-2 whitespace-nowrap text-sm"><Square size={16} fill="currentColor" className="animate-pulse" /> 기록 정지됨</div>}
                                 <div className={`font-black tabular-nums tracking-tighter drop-shadow-sm ${numberAnimClass}`} style={{ fontSize: isPopup ? '14vw' : 'min(18vw, 15vh)', lineHeight: 1 }}>
@@ -1437,7 +1637,7 @@ export default function App() {
                                 <div className="absolute inset-0 rounded-full border-4 border-emerald-500/50 animate-ping"></div>
                              </div>
                         </div>
-                        <div className={`transition-all duration-700 ease-[cubic-bezier(0.34,1.56,0.64,1)] absolute flex flex-col items-center z-10 ${status === 'paused' ? 'translate-y-[2vh] scale-100 opacity-100 blur-0' : 'translate-y-[5vh] scale-50 opacity-0 blur-md pointer-events-none'}`}>
+                        <div className={`transition-all duration-700 ease-[cubic-bezier(0.34,1.56,0.64,1)] absolute flex flex-col items-center z-10 ${status === 'paused' ? 'translate-y-0 scale-100 opacity-100 blur-0' : 'translate-y-[5vh] scale-50 opacity-0 blur-md pointer-events-none'}`}>
                             <div className="flex items-center gap-2 text-emerald-600 dark:text-emerald-400 font-bold uppercase tracking-widest mb-3 px-4 py-1 rounded-full bg-emerald-100/80 dark:bg-emerald-900/60 backdrop-blur-md shadow-lg border border-emerald-200/50 dark:border-emerald-800/50 text-sm">
                                 <Coffee size={16} className="animate-bounce" /> {!isPopup && '휴식 시간'}
                             </div>
@@ -1447,7 +1647,27 @@ export default function App() {
                         </div>
                     </div>
                     <div className={`${isPopup ? 'mb-2' : 'mb-8'} max-w-md mx-auto w-full relative z-30`}>
-                        <input type="text" placeholder="어떤 작업을 하고 계신가요?" value={status === 'idle' ? taskNameInput : (currentSession?.name || '')} onChange={(e) => { const val = e.target.value; setTaskNameInput(val); if (currentSession) { const updated = { ...currentSession, name: val }; setCurrentSession(updated); syncToFirestore('status_update', {status, currentSession: updated}); } }} onMouseDown={(e) => e.stopPropagation()} className="w-full text-center font-bold placeholder:text-slate-300 dark:placeholder:text-slate-600 text-slate-800 dark:text-slate-100 border-b-2 border-transparent focus:border-indigo-500/50 focus:outline-none bg-transparent transition-all rounded-lg py-2 select-text" style={{ fontSize: isPopup ? '1rem' : 'min(6vw, 3.5vh)' }} />
+                        <input 
+                            type="text" 
+                            placeholder="어떤 작업을 하고 계신가요?" 
+                            value={taskNameInput} 
+                            onChange={(e) => setTaskNameInput(e.target.value)}
+                            onBlur={() => {
+                                if (currentSession && currentSession.name !== taskNameInput) {
+                                    const updated = { ...currentSession, name: taskNameInput };
+                                    setCurrentSession(updated);
+                                    syncToFirestore('status_update', {status, currentSession: updated});
+                                }
+                            }}
+                            onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                    e.currentTarget.blur();
+                                }
+                            }}
+                            onMouseDown={(e) => e.stopPropagation()} 
+                            className="w-full text-center font-bold placeholder:text-slate-300 dark:placeholder:text-slate-600 text-slate-800 dark:text-slate-100 border-b-2 border-transparent focus:border-indigo-500/50 focus:outline-none bg-transparent transition-all rounded-lg py-2 select-text" 
+                            style={{ fontSize: isPopup ? '1rem' : 'min(6vw, 3.5vh)' }} 
+                        />
                     </div>
                     <div className={`flex flex-row items-center gap-3 sm:gap-4 w-full max-w-xl mx-auto transition-all duration-500 px-2 relative z-40`} style={{ height: isPopup ? '48px' : 'min(15vw, 8vh)' }}>
                         <div className={`transition-all duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] h-full ${showSideButtons ? 'flex-[0.85]' : 'flex-[100%]'}`}>
@@ -1525,7 +1745,8 @@ export default function App() {
                         const isCollapsed = collapsedGroups.has(group.dateStr);
                         const sessionCount = group.sessions.length;
                         return (
-                        <div key={`${group.dateStr}-${historyFilterGroupId}`} id={`history-group-${group.dateStr.replace(/\./g, '-').replace(/ /g, '')}`} className="scroll-mt-28 animate-in slide-in-from-bottom-2 duration-500" style={{ animationDelay: `${idx * 50}ms` }}>
+                        <div key={`${group.dateStr}-${historyFilterGroupId}`} id={`history-group-${group.dateStr.replace(/\./g, '-').replace(/ /g, '')}`} className="scroll-mt-28 animate-in slide-in-from-bottom-2 duration-500 relative" style={{ animationDelay: `${idx * 50}ms` }}>
+                            
                             {/* Sticky Header with Click Handler */}
                             <div className="sticky top-16 z-20 pb-2">
                                 <div className="glass-panel flex items-center justify-between px-4 py-2.5 rounded-2xl cursor-pointer hover:bg-white dark:hover:bg-slate-800/80 transition-all group shadow-sm backdrop-blur-md select-none border border-slate-200/50 dark:border-slate-700/50" onClick={() => toggleGroupCollapse(group.dateStr)}>
@@ -1552,27 +1773,29 @@ export default function App() {
                             {/* Animated Collapsible Content using grid-template-rows */}
                             <div className={`grid transition-[grid-template-rows] duration-500 ease-[cubic-bezier(0.34,1.56,0.64,1)] ${isCollapsed ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]'}`}>
                                 <div className="overflow-hidden">
-                                    <div className="space-y-3 pt-1 pb-2 px-1">
+                                    <div className="space-y-8 pt-4 pb-8 px-1 relative">
                                         {historyViewMode === 'task' ? (
-                                            group.sessions.map(session => (
-                                                <SessionCard key={session.id} session={session} groups={groups} 
-                                                    onRename={(id, name) => {
-                                                        const updated = {...session, name};
-                                                        setSessionHistory(prev => prev.map(s => s.id === id ? updated : s));
-                                                        syncToFirestore('history_update', { session: updated, action: 'update' });
-                                                    }} 
-                                                    onGroupChange={(id, groupId) => {
-                                                        const updated = {...session, groupId};
-                                                        setSessionHistory(prev => prev.map(s => s.id === id ? updated : s));
-                                                        syncToFirestore('history_update', { session: updated, action: 'update' });
-                                                    }} 
-                                                    onMemoChange={(id, memo) => {
-                                                        const updated = {...session, memo};
-                                                        setSessionHistory(prev => prev.map(s => s.id === id ? updated : s));
-                                                        syncToFirestore('history_update', { session: updated, action: 'update' });
-                                                    }} 
-                                                    onContinue={handleContinueSession} onDelete={handleDeleteRequest} onRemoveHold={handleRemoveHold} isHighlighted={session.id === highlightedSessionId} 
-                                                />
+                                            group.sessions.map((session, sIdx) => (
+                                                <div key={session.id} className="relative">
+                                                    <SessionCard session={session} groups={groups} 
+                                                        onRename={(id, name) => {
+                                                            const updated = {...session, name};
+                                                            setSessionHistory(prev => prev.map(s => s.id === id ? updated : s));
+                                                            syncToFirestore('history_update', { session: updated, action: 'update' });
+                                                        }} 
+                                                        onGroupChange={(id, groupId) => {
+                                                            const updated = {...session, groupId};
+                                                            setSessionHistory(prev => prev.map(s => s.id === id ? updated : s));
+                                                            syncToFirestore('history_update', { session: updated, action: 'update' });
+                                                        }} 
+                                                        onMemoChange={(id, memo) => {
+                                                            const updated = {...session, memo};
+                                                            setSessionHistory(prev => prev.map(s => s.id === id ? updated : s));
+                                                            syncToFirestore('history_update', { session: updated, action: 'update' });
+                                                        }} 
+                                                        onContinue={handleContinueSession} onDelete={handleDeleteRequest} onRemoveHold={handleRemoveHold} isHighlighted={session.id === highlightedSessionId} 
+                                                    />
+                                                </div>
                                             ))
                                         ) : (
                                             <div className="pl-2">
@@ -1619,7 +1842,7 @@ export default function App() {
           onContinue={handleContinueSession} onRestore={handleRestoreSegment} onDeleteSegment={handleDeleteSegment} onDeleteBreak={handleDeleteBreak} breakTrackingMode='pause-only' initialDate={calendarInitialDate} />)}
       {timeTableData && <DailyTimeTable dateStr={timeTableData.dateStr} targetDate={timeTableData.dateObj} sessions={timeTableData.sessions} groups={groups} onClose={() => setTimeTableData(null)} breakTrackingMode='pause-only' onPrevDate={() => handleTimeTableDateChange(-1)} onNextDate={() => handleTimeTableDateChange(1)} averages={null} />}
       
-      {isSettingsOpen && <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} isDarkMode={isDarkMode} toggleTheme={toggleTheme} onExport={() => downloadCSV(activeHistory, groups)} notificationSettings={notificationSettings} onUpdateNotification={(s) => {setNotificationSettings(s); syncToFirestore('settings_update', {settings: s});}} groups={groups} onUpdateGroups={handleUpdateGroups} installPrompt={installPrompt} onInstall={handleInstallClick} onClearData={handleClearData} />}
+      {isSettingsOpen && <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} isDarkMode={isDarkMode} toggleTheme={toggleTheme} onExport={() => downloadCSV(activeHistory, groups)} notificationSettings={notificationSettings} onUpdateNotification={(s) => {setNotificationSettings(s); syncToFirestore('settings_update', {settings: s});}} groups={groups} onUpdateGroups={handleUpdateGroups} installPrompt={installPrompt} onInstall={handleInstallClick} onClearData={handleClearData} user={user} onLogin={handleLogin} onLogout={handleLogout} />}
       {isTrashOpen && (<TrashModal deletedSessions={deletedHistory} activeSessions={activeHistory} groups={groups} onClose={() => setIsTrashOpen(false)} onRestore={restoreSession} onPermanentDelete={permanentDeleteSession} onEmptyTrash={emptyTrash} onRestoreSegment={handleRestoreSegment} />)}
     </div>
   );

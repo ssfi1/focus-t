@@ -19,7 +19,8 @@ export const StatsDashboard: React.FC<StatsDashboardProps> = ({
   groups, 
   onClose,
 }) => {
-  const [range, setRange] = useState<'all' | 'week' | 'month' | 'custom' | 'yesterday'>('week');
+  // Default range set to 'all'
+  const [range, setRange] = useState<'all' | 'week' | 'month' | 'custom' | 'yesterday'>('all');
   const [chartType, setChartType] = useState<ChartType>('balance');
   
   // Custom Range State

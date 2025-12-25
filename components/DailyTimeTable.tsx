@@ -1,7 +1,7 @@
 
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useState, useRef, useEffect } from 'react';
 import { Session, Group } from '../types';
-import { formatDurationHM, formatDuration, generateTaskColor, calculateDailyTotal, calculateBreakTime } from '../utils';
+import { formatDurationHM, formatDuration, generateTaskColor, calculateDailyTotal, calculateBreakTime, formatTimeHM } from '../utils';
 import { X, Clock, ChevronLeft, ChevronRight, Coffee, Square } from 'lucide-react';
 import { Dropdown } from './Dropdown';
 
@@ -15,6 +15,11 @@ interface DailyTimeTableProps {
   onPrevDate?: () => void;
   onNextDate?: () => void;
   averages?: { work: number, break: number } | null;
+}
+
+interface ConfirmState {
+  sessionId: string;
+  segmentIndex: number;
 }
 
 export const DailyTimeTable: React.FC<DailyTimeTableProps> = ({ 
@@ -155,7 +160,7 @@ export const DailyTimeTable: React.FC<DailyTimeTableProps> = ({
     startTime = allStartTimes.length > 0 ? Math.min(...allStartTimes) : new Date(targetDate).setHours(9,0,0,0);
     endTime = allEndTimes.length > 0 ? Math.max(...allEndTimes) : Date.now();
 
-    if (filteredSessions.length === 0) return { slices: [], totalDuration: 0 };
+    if (filteredSessions.length === 0) return { slices: [], totalDuration: 0, startTime, endTime };
 
     // 2. Build Timeline Items (Include deleted to manage time gaps, but exclude from rendering)
     const timelineItems: { start: number; end: number; session: Session; stopReason?: string; deletedAt?: number }[] = [];
@@ -275,7 +280,7 @@ export const DailyTimeTable: React.FC<DailyTimeTableProps> = ({
         };
     });
 
-    return { slices: finalSlices, totalDuration: totalValidDuration };
+    return { slices: finalSlices, totalDuration: totalValidDuration, startTime, endTime };
   }, [sessions, filteredSessions, targetDate, breakTrackingMode, selectedGroupId]);
 
   // Aggregate Data for List View (by Task Name)
@@ -367,6 +372,8 @@ export const DailyTimeTable: React.FC<DailyTimeTableProps> = ({
                         <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`} className="transform rotate-0">
                             {/* Base Circle */}
                             <circle cx={CENTER} cy={CENTER} r={RADIUS} fill="transparent" stroke="currentColor" strokeWidth="1" className="text-slate-100 dark:text-slate-800" />
+                            
+                            {/* Start Time Indicator REMOVED as per request */}
                             
                             {/* Slices */}
                             {chartData.slices.map((slice, i) => {

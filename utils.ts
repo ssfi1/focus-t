@@ -338,7 +338,7 @@ export const downloadCSV = (sessions: Session[], groups: Group[]) => {
     csvRows.push(row);
   });
   const bom = '\uFEFF';
-  const blob = new Blob([bom + csvRows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+  const blob = new Blob([bom + csvRows.join('\n')], { type: 'text/csv;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.setAttribute("href", url);
